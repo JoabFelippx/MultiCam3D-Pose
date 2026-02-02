@@ -1,4 +1,4 @@
-![til](figures\demo_reconstruction_3d.gif)
+![til](./figures/demo_reconstruction_3d.gif)
 # MultiCam3D-Pose
 
 > Multi-camera 3D human pose estimation and skeleton reconstruction system
@@ -166,5 +166,6 @@ config = {
     "yolo_model": "./models/yolo26m-pose.engine"
 }
 ```
+
 
 ---
