@@ -1,0 +1,10 @@
+# torch==2.2.2
+# torchvision==0.17.2
+ultralytics
+opencv-python
+numpy
+matplotlib
+networkx
+is-wire
+is-msgs
+six
