@@ -1,6 +1,8 @@
 from dataclasses import dataclass, field
 from typing import Dict
 
+from networkx.algorithms.bipartite import extendability
+
 import numpy as np
 import networkx as nx
 
@@ -43,8 +45,42 @@ class SkeletonMatcher:
         denominators[denominators == 0] = np.inf
         return numerators / denominators
 
+
+    def _sampson_error_vectorized(self, pts1_h, pts2_h, F):
+
+        """
+        pts1_h, pts2_h: (K, 3) homogêneos
+        F: (3, 3)
+        Retorna: (K,) erro Sampson por keypoint
+        """
+
+        # Fx1
+        line_on_image_2 = (F @ pts1_h.T).T  # (K, 3)
+
+        # F^T x2
+        line_on_image_1 = (F.T @ pts2_h.T).T  # (K, 3)
+
+        # x2^T F x1
+        # produto linha a linha
+        e = np.sum(pts2_h * (F @ pts1_h.T).T, axis=1)
+
+        numerator = e ** 2
+
+        denominator = (
+            line_on_image_2[:, 0] ** 2 +
+            line_on_image_2[:, 1] ** 2 +
+            line_on_image_1[:, 0] ** 2 +
+            line_on_image_1[:, 1] ** 2
+        )
+
+        # evita divisão por zero
+        denominator[denominator < 1e-12] = np.inf
+
+        return numerator / denominator
+
     def _calculate_skeleton_compatibility_vectorized(self, sk1, sk2, F_1_to_2, F_2_to_1):
-        
+    
+
         # Identifica quais keypoints são válidos (não zero)
         valid_mask = ~((np.all(sk1 == 0, axis=1)) | (np.all(sk2 == 0, axis=1)))
         
@@ -63,23 +99,36 @@ class SkeletonMatcher:
         pts1_h = np.hstack([pts1, ones])
         pts2_h = np.hstack([pts2, ones])
 
-        # 1. Epilines no frame 2 geradas pelos pontos do frame 1
-        # l = F @ p.  Shape: (3, 3) @ (K, 3).T -> (3, K) -> Transpose -> (K, 3)
-        lines_on_2 = (F_1_to_2 @ pts1_h.T).T
+        # # 1. Epilines no frame 2 geradas pelos pontos do frame 1
+        # # l = F @ p.  Shape: (3, 3) @ (K, 3).T -> (3, K) -> Transpose -> (K, 3)
+        # lines_on_2 = (F_1_to_2 @ pts1_h.T).T
         
-        # 2. Epilines no frame 1 geradas pelos pontos do frame 2
+        # # 2. Epilines no frame 1 geradas pelos pontos do frame 2
         lines_on_1 = (F_2_to_1 @ pts2_h.T).T
         
-        # Calcula distâncias vetorizadas
-        dists_on_2 = self._dist_p_l_vectorized(pts2, lines_on_2)
-        dists_on_1 = self._dist_p_l_vectorized(pts1, lines_on_1)
+        # # Calcula distâncias vetorizadas
+        # dists_on_2 = self._dist_p_l_vectorized(pts2, lines_on_2)
+        # dists_on_1 = self._dist_p_l_vectorized(pts1, lines_on_1)
         
+        sampson_errors = self._sampson_error_vectorized(
+                                    pts1_h,
+                                    pts2_h,
+                                    F_1_to_2
+                                )
+        
+
+        # print(sampson_errors)
+        # exit()
+
         # Lógica de Threshold
-        max_dist = self.config['max_epipolar_dist']
+        # max_dist = self.config['max_epipolar_dist']
+        max_sampson = self.config.get('max_sampson_error', 5.0)
+
         
         # Pontos que satisfazem a condição em AMBOS os sentidos
-        match_mask = (dists_on_2 < max_dist) & (dists_on_1 < max_dist)
-        
+        # match_mask = (dists_on_2 < max_dist) & (dists_on_1 < max_dist)
+        match_mask = sampson_errors < max_sampson
+
         # Soma os pesos onde match_mask é True
         score = np.sum(weights[match_mask])
         

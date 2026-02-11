@@ -32,26 +32,27 @@ def main():
     config = {
         "calib_path": f"{base_dir}/calib_cameras",
         "video_path": f"{base_dir}/videos",
-        "yolo_model": f"{base_dir}/models/yolo26m-pose.engine ",
+        "yolo_model": f"{base_dir}/models/yolo26m-pose.pt",
         "num_cameras": 4,
         "n_keypoints": 18,
         
         #   Primeiro filtro
-        "max_epipolar_dist": 15,  
+        "max_sampson_error": 4, 
+        # "max_epipolar_dist": 15,  
         "min_matching_joints": 5,         
         #   Segundo filtro
-        "max_intersection_dist": 7,  
-        "weight_distance": 0.75,
-        "weight_score": 0.25,
+        "max_intersection_dist": 8,  
+        "weight_distance": 0.80,
+        "weight_score": 0.20,
         #   Terceiro filtro
-        "min_keypoints_for_grouping": 8,
+        "min_keypoints_for_grouping": 10,
     
         "kp_weights": {
             0: 1,  # Nose
-            1: 0.2,  # Right Eye
-            2: 0.2,  # Left Eye
-            3: 0.2,  # Right Ear
-            4: 0.2,  # Left Ear
+            1: 0.0,  # Right Eye
+            2: 0.0,  # Left Eye
+            3: 0.0,  # Right Ear
+            4: 0.0,  # Left Ear
             5: 1.0,  # Right Shoulder
             6: 1.0,  # Left Shoulder
             7: 1.0,  # Right Elbow
@@ -141,7 +142,7 @@ def main():
 
         plot_img_bgr = visualizer.update(frames, skeletons_to_visualize, extrinsic_matrices)
     
-        h_small, w_small = 460, 300
+        h_small, w_small = 380, 225
         imgs_resized = [cv2.resize(f, (w_small, h_small), interpolation=cv2.INTER_NEAREST) for f in frames[:4]]
         
         linha1 = np.hstack(imgs_resized[:2])
