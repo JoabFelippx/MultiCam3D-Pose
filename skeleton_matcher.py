@@ -21,9 +21,10 @@ class SkeletonMatch:
 
 class SkeletonMatcher:
     
-    def __init__(self, fundamentals: dict, config: dict):
+    def __init__(self, fundamentals: dict, config: dict, projection_matrices: dict = None):
         self.fundamentals = fundamentals
         self.config = config
+        self.projection_matrices = projection_matrices
         self.line_color_per_cam = {
             i: (int(np.random.randint(0, 255)), int(np.random.randint(0, 255)), int(np.random.randint(0, 255)))
             for i in range(config['num_cameras'])
@@ -137,6 +138,149 @@ class SkeletonMatcher:
         
         return score, full_lines_on_1
     
+    def _check_cycle_consistency(self, cam_a: int, skt_a_id: int, 
+                                  cam_b: int, skt_b_id: int,
+                                  cam_c: int, skt_c_id: int,
+                                  skeletons_by_cam: list) -> float:
+        """
+        Verifica a consistência do ciclo A -> B -> C -> A
+        
+        Args:
+            cam_a, skt_a_id: Câmera e ID do skeleton A
+            cam_b, skt_b_id: Câmera e ID do skeleton B  
+            cam_c, skt_c_id: Câmera e ID do skeleton C
+            skeletons_by_cam: Lista de skeletons por câmera
+            
+        Returns:
+            float: Score de consistência do ciclo (maior = mais consistente)
+        """
+        # Pega os skeletons
+        sk_a = skeletons_by_cam[cam_a][skt_a_id]
+        sk_b = skeletons_by_cam[cam_b][skt_b_id]
+        sk_c = skeletons_by_cam[cam_c][skt_c_id]
+        
+        # Calcula compatibilidade A -> B
+        F_a_to_b = self.fundamentals[cam_a][cam_b]
+        F_b_to_a = self.fundamentals[cam_b][cam_a]
+        score_ab, _ = self._calculate_skeleton_compatibility_vectorized(
+            sk_a, sk_b, F_a_to_b, F_b_to_a
+        )
+        
+        # Calcula compatibilidade B -> C
+        F_b_to_c = self.fundamentals[cam_b][cam_c]
+        F_c_to_b = self.fundamentals[cam_c][cam_b]
+        score_bc, _ = self._calculate_skeleton_compatibility_vectorized(
+            sk_b, sk_c, F_b_to_c, F_c_to_b
+        )
+        
+        # Calcula compatibilidade C -> A (fecha o ciclo)
+        F_c_to_a = self.fundamentals[cam_c][cam_a]
+        F_a_to_c = self.fundamentals[cam_a][cam_c]
+        score_ca, _ = self._calculate_skeleton_compatibility_vectorized(
+            sk_c, sk_a, F_c_to_a, F_a_to_c
+        )
+        
+        # Score do ciclo é a média geométrica (penaliza se algum link for fraco)
+        if score_ab > 0 and score_bc > 0 and score_ca > 0:
+            cycle_score = (score_ab * score_bc * score_ca) ** (1/3)
+        else:
+            cycle_score = 0.0
+            
+        return cycle_score
+
+    def _validate_with_cycle_consistency(self, matches: Dict, 
+                                         skeletons_by_cam: list,
+                                         ids_by_cam: list) -> Dict:
+        """
+        Valida e filtra matches usando cycle consistency.
+        
+        Para cada par de matches (cam_a, sk_a) <-> (cam_b, sk_b),
+        verifica se existe uma terceira câmera cam_c onde o ciclo
+        A -> B -> C -> A é consistente.
+        
+        Args:
+            matches: Dicionário de matches do método match()
+            skeletons_by_cam: Lista de skeletons por câmera
+            ids_by_cam: Lista de IDs por câmera
+            
+        Returns:
+            Dict: Matches filtrados e com scores de cycle consistency
+        """
+        weight_cycle = self.config.get('weight_cycle', 0.5)
+        
+        validated_matches = {}
+        
+        for cam_ref, skeletons_data in matches.items():
+            validated_matches[cam_ref] = {}
+            
+            for skt_ref_id, skt_match in skeletons_data.items():
+                # Encontra o índice do skeleton na lista
+                idx_ref = ids_by_cam[cam_ref].index(skt_ref_id)
+                
+                # Para cada câmera com matches
+                for cam_other in skt_match.matches_by_cam.keys():
+                    match_data = skt_match.matches_by_cam[cam_other]
+                    
+                    # Para cada skeleton candidato na outra câmera
+                    validated_skts = []
+                    validated_scores = []
+                    validated_epilines = []
+                    
+                    for i, skt_other_id in enumerate(match_data.skt_ids):
+                        original_score = match_data.scores[i]
+                        
+                        # Busca uma terceira câmera para fechar o ciclo
+                        best_cycle_score = 0.0
+                        
+                        for cam_third in range(self.config['num_cameras']):
+                            # Pula se for uma das câmeras já envolvidas
+                            if cam_third == cam_ref or cam_third == cam_other:
+                                continue
+                            
+                            # Pula se não houver skeletons nesta câmera
+                            if len(skeletons_by_cam[cam_third]) == 0:
+                                continue
+                                
+                            # Tenta cada skeleton da terceira câmera
+                            for idx_third, skt_third in enumerate(skeletons_by_cam[cam_third]):
+                                skt_third_id = ids_by_cam[cam_third][idx_third]
+                                
+                                # Verifica cycle consistency
+                                cycle_score = self._check_cycle_consistency(
+                                    cam_ref, idx_ref,
+                                    cam_other, ids_by_cam[cam_other].index(skt_other_id),
+                                    cam_third, idx_third,
+                                    skeletons_by_cam
+                                )
+                                
+                                best_cycle_score = max(best_cycle_score, cycle_score)
+                        
+                        # Combina score original com cycle consistency
+                        combined_score = (1 - weight_cycle) * original_score + weight_cycle * best_cycle_score
+                        
+                        # Só adiciona se passar um threshold mínimo
+                        min_cycle_threshold = self.config.get('min_cycle_score', 0.0)
+                        if best_cycle_score >= min_cycle_threshold:
+                            validated_skts.append(skt_other_id)
+                            validated_scores.append(combined_score)
+                            validated_epilines.append(match_data.epilines[i])
+                    
+                    # Atualiza os matches com os validados
+                    if validated_skts:
+                        if skt_ref_id not in validated_matches[cam_ref]:
+                            validated_matches[cam_ref][skt_ref_id] = SkeletonMatch(
+                                cam_ref=cam_ref,
+                                skt_ref_id=skt_ref_id
+                            )
+                        
+                        validated_matches[cam_ref][skt_ref_id].matches_by_cam[cam_other] = MatchData(
+                            skt_ids=validated_skts,
+                            scores=validated_scores,
+                            epilines=validated_epilines
+                        )
+        
+        return validated_matches
+    
     def extract_skeletons_from_annotations(self, annotations):
         skeletons_by_cam = []
         ids_by_cam = []
@@ -171,7 +315,7 @@ class SkeletonMatcher:
                                 lines_per_kp.setdefault(kp_idx, []).append((cam_other, match_data.skt_ids[idx], match_data.scores[idx], line))   
         return lines_per_kp
     
-    def match(self, skeletons_by_cam: list, ids_by_cam: list, frames,): 
+    def match(self, skeletons_by_cam: list, ids_by_cam: list, frames, use_cycle_consistency=True): 
     
         matches: Dict[int, Dict[int, SkeletonMatch]] = {}
 
@@ -197,129 +341,108 @@ class SkeletonMatcher:
                     skeletons_other_cam = skeletons_by_cam[cam_other]
                     ids_other_cam = ids_by_cam[cam_other]
                     
+                    F_other_to_ref = self.fundamentals[cam_other][cam_ref]
+                    
                     for idx_skt_other, skt_other in enumerate(skeletons_other_cam):
                         
                         skt_other_id = ids_other_cam[idx_skt_other]
-
-                        score, lines_on_1 = self._calculate_skeleton_compatibility_vectorized(
-                            skt_ref, 
-                            skt_other, 
-                            F_ref_to_other,
-                            self.fundamentals[cam_other][cam_ref],
+                        
+                        compatibility_score, full_lines_on_ref = self._calculate_skeleton_compatibility_vectorized(
+                            skt_ref, skt_other, F_ref_to_other, F_other_to_ref
                         )
                         
-                        if lines_on_1 is None:
-                            continue
+                        min_matching_joints = self.config.get('min_matching_joints', 5)
                         
-                        if score >= self.config['min_matching_joints']:
-                            entry = skt_match.matches_by_cam[cam_other]
-                            entry.skt_ids.append(skt_other_id)
-                            entry.scores.append(score)
-                            entry.epilines.append(lines_on_1)
-                        
+                        if compatibility_score >= min_matching_joints:
+                            skt_match.matches_by_cam[cam_other].skt_ids.append(skt_other_id)
+                            skt_match.matches_by_cam[cam_other].scores.append(compatibility_score)
+                            skt_match.matches_by_cam[cam_other].epilines.append(full_lines_on_ref)
+                
                 matches[cam_ref][skt_ref_id] = skt_match
         
-        refined_matches = self.filter_intersection_of_epipolar_lines(skeletons_by_cam, ids_by_cam,matches, frames)
+        if use_cycle_consistency:
+            print("Aplicando validação por cycle consistency...")
+            matches = self._validate_with_cycle_consistency(matches, skeletons_by_cam, ids_by_cam)
+        
+        refined_matches = self.refine_matches(matches)
         matched_persons = self.build_skeleton_groups(refined_matches)
         
         return matched_persons
-
-    def filter_intersection_of_epipolar_lines(self, skeletons_by_cam, ids_by_cam, matches: Dict[int, Dict[int, SkeletonMatch]], frames):
+    
+    def refine_matches(self, matches: Dict[int, Dict[int, SkeletonMatch]]):
         
-        refined_matches = {}
-        for cam_ref, skt_matches_by_id in matches.items():
+        refined_by_cam = {}
+        
+        for cam_ref, skeletons in matches.items():
+            refined_by_cam[cam_ref] = {}
             
-            refined_matches.setdefault(cam_ref, {})
-            current_ids_list = ids_by_cam[cam_ref]
-            
-            for skt_ref_id, skt_match in skt_matches_by_id.items():
-                if skt_ref_id not in current_ids_list:
-                    continue
-            
-                ref_index = current_ids_list.index(skt_ref_id)
-                skeleton_ref = skeletons_by_cam[cam_ref][ref_index]
+            for skt_ref_id, skt_match in skeletons.items():
+                
+                refined_by_cam[cam_ref][skt_ref_id] = {}
                 
                 lines_per_kp = self.organize_epilines_by_keypoint(skt_match)
                 
-                # para cada keypoint, encontrar a melhor correspondência
-                best_matches_for_skeleton = {}
-                
-                for kp_idx, lines_info in lines_per_kp.items():
-                
-                    kp_ref = skeleton_ref[kp_idx]
-                    
-                    # pula keypoints inválidos
-                    if np.all(kp_ref == 0):
+                for kp_idx in range(self.config['n_keypoints']):
+                    if kp_idx not in lines_per_kp:
+                        refined_by_cam[cam_ref][skt_ref_id][kp_idx] = None
                         continue
-                
-                    # agrupar por camera as linhas epipolares
-                    lines_by_cam = {}
-                    for cam_other, skt_other_id, score, line in lines_info:
-                        lines_by_cam.setdefault(cam_other, []).append(
-                        {
-                            'skt_id': skt_other_id,
-                            'score': score,
-                            'line': line
-                        })
+                    
+                    data = lines_per_kp[kp_idx]
+                    if len(data) < 2:
+                        refined_by_cam[cam_ref][skt_ref_id][kp_idx] = None
+                        continue
+                    
+                    from itertools import combinations
+                    
+                    candidate_combinations = list(combinations(data, 2))
+                    graph_dists = {}
+                    graph_scores = {}
+                    
+                    for combo in candidate_combinations:
+                        (cam_1, skt_1, score_1, line_1), (cam_2, skt_2, score_2, line_2) = combo
                         
-                    best_combination = self._find_best_combination_for_keypoint(
-                        kp_ref, lines_by_cam, cam_ref, frames)                    
-                
-                    if best_combination:
-                        best_matches_for_skeleton[kp_idx] = best_combination
+                        point_intersect = self._compute_line_intersection_2d(line_1, line_2)
                         
-                refined_matches[cam_ref][skt_ref_id] = best_matches_for_skeleton
-        return refined_matches
-    
-    def _find_best_combination_for_keypoint(self, kp_ref, lines_by_cam, cam_ref, frames):
-        
-        cam_ids = list(lines_by_cam.keys())
-        
-        if len(cam_ids) < 2:
-            return None
-        
-        graph_scores = {} # (skt_id_cam1, skt_id_cam2, ...)
-        graph_dists = {}  # (skt_id_cam1, skt_id_cam2, ...)
-        
-        for i in range(len(cam_ids)):
-            for j in range(len(cam_ids)):
-                if i == j:
-                    continue
-                
-                cam_i = cam_ids[i]
-                cam_j = cam_ids[j]
-                
-                lines_info_i = lines_by_cam[cam_i]
-                lines_info_j = lines_by_cam[cam_j]
-                
-                for line_data_i in lines_info_i:
-                    for line_data_j in lines_info_j:
-                        
-                        intersection_pt = self._compute_line_intersection_2d(
-                            line_data_i['line'], line_data_j['line'])
-                        
-                        if intersection_pt is None:
+                        if point_intersect is None:
                             continue
-                            
-                        dist = np.linalg.norm(intersection_pt - kp_ref)    
                         
-                        if dist <= self.config.get('max_intersection_dist', 7):
-                            key = tuple(
-                                sorted([
-                                    (cam_i, line_data_i['skt_id']),
-                                    (cam_j, line_data_j['skt_id'])
-                                ])
-                            )
-                                
-                            score = line_data_i['score'] + line_data_j['score']
-                            
-                            graph_scores[key] = score + graph_scores.get(key, 0)
-                            graph_dists[key] = graph_dists.get(key, 0) + dist
-                            
-        if not graph_scores:
-            return None
+                        dists_to_lines = []
+                        for _, _, _, line_k in data:
+                            dist = self._dist_p_l_vectorized(
+                                np.array([point_intersect]), 
+                                np.array([line_k])
+                            )[0]
+                            dists_to_lines.append(dist)
+                        
+                        avg_dist = np.mean(dists_to_lines)
+                        
+                        max_dist_threshold = self.config.get('max_intersection_dist', 8)
+                        if avg_dist > max_dist_threshold:
+                            continue
+                        
+                        avg_score = (score_1 + score_2) / 2.0
+                        
+                        key = (
+                            (cam_1, skt_1),
+                            (cam_2, skt_2)
+                        )
+                        
+                        graph_dists[key] = avg_dist
+                        graph_scores[key] = avg_score
+                    
+                    if len(graph_scores) == 0:
+                        refined_by_cam[cam_ref][skt_ref_id][kp_idx] = None
+                        continue
+                    
+                    best_combination = self._select_best_combination(graph_scores, graph_dists)
+                    best_combination['avg_dist'] = graph_dists[best_combination['original_key']]
+                    
+                    refined_by_cam[cam_ref][skt_ref_id][kp_idx] = best_combination
+                    
+        return refined_by_cam
         
-        # Normalizar scores e distâncias
+    def _select_best_combination(self, graph_scores, graph_dists):
+        
         scores = np.array(list(graph_scores.values()))
         dists = np.array([graph_dists[k] for k in graph_scores.keys()])
         keys = list(graph_scores.keys())
@@ -360,6 +483,7 @@ class SkeletonMatcher:
         
         return {
             'combination': dict(best_key),
+            'original_key': best_key,
             'score': graph_scores[best_key],
             'combined_cost': combined_cost[best_idx]
         }

@@ -35,9 +35,13 @@ def main():
         "yolo_model": f"{base_dir}/models/yolo26m-pose.pt",
         "num_cameras": 4,
         "n_keypoints": 18,
-        
+
+        "weight_cycle": 0.5,
+        # "duplicate_distance_threshold": 0.2, ainda não implementado e talvez não precise
+        "min_cycle_score": 1,
+
         #   Primeiro filtro
-        "max_sampson_error": 4, 
+        "max_sampson_error": 5, 
         # "max_epipolar_dist": 15,  
         "min_matching_joints": 5,         
         #   Segundo filtro
@@ -84,7 +88,7 @@ def main():
     fundamentals = geometry.fundamental_matrices_all()
     extrinsic_matrices = geometry.get_extrinsic_matrices()
 
-    matcher = SkeletonMatcher(fundamentals, config)
+    matcher = SkeletonMatcher(fundamentals, config, projection_matrices)
     reconstructor = Reconstructor3D(projection_matrices, config)
 
     visualizer = Visualizer()
